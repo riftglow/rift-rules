@@ -105,4 +105,6 @@ jobs:
             exit 0
           fi
           git commit -m "rules: update $(date -u +%F) (${MERGED_COUNT} domains)"
-          git push origin srs
+          # 工作树是 detached HEAD（worktree add 远端分支不建本地分支），
+          # 必须用 HEAD:srs 显式推送，不能用裸分支名 srs。
+          git push origin HEAD:srs
