@@ -1,0 +1,108 @@
+name: Build rules
+
+on:
+  schedule:
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+
+      - name: Download sing-box (pinned v1.15.0-alpha.13)
+        run: |
+          set -euo pipefail
+          curl -sfL -o sing-box.tar.gz https://github.com/SagerNet/sing-box/releases/download/v1.15.0-alpha.13/sing-box-1.15.0-alpha.13-linux-amd64.tar.gz
+          tar xzf sing-box.tar.gz
+          ./sing-box-1.15.0-alpha.13-linux-amd64/sing-box version
+
+      - name: Download inputs
+        run: |
+          set -euo pipefail
+          curl -sfL -o meta-cn.srs https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/cn.srs
+          curl -sfL -o sager-cn.srs https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-cn.srs
+          curl -sfL -o loyal-cn.srs https://raw.githubusercontent.com/Loyalsoldier/geoip/release/srs/cn.srs
+          curl -sfL -o sager-ads.srs https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-category-ads-all.srs
+
+      - name: Build merged geosite-cn.srs
+        run: |
+          set -euo pipefail
+          SB=./sing-box-1.15.0-alpha.13-linux-amd64/sing-box
+          $SB rule-set decompile meta-cn.srs -o meta-cn.json
+          $SB rule-set decompile sager-cn.srs -o sager-cn.json
+          python3 scripts/build_cn.py
+          $SB rule-set compile rift-cn.json -o geosite-cn.srs
+          cp loyal-cn.srs geoip-cn.srs
+          cp sager-ads.srs geosite-category-ads-all.srs
+          echo "MERGED_COUNT=$(python3 -c "import json; d=json.load(open('rift-cn.json')); print(sum(len(r.get('domain_suffix', [])) + len(r.get('domain', [])) for r in d['rules']))")" >> "$GITHUB_ENV"
+          ls -l geosite-cn.srs geoip-cn.srs geosite-category-ads-all.srs
+
+      - name: Validation gates
+        run: |
+          set -euo pipefail
+          SB=./sing-box-1.15.0-alpha.13-linux-amd64/sing-box
+          python3 - <<'PYEOF'
+          import json, os, sys
+          def check_srs(path):
+              b = open(path, 'rb').read(4)
+              assert b[:3] == b'SRS', f"{path}: bad magic {b[:3]!r}"
+              assert 1 <= b[3] <= 5, f"{path}: bad version {b[3]}"
+          for f in ['geosite-cn.srs', 'geoip-cn.srs', 'geosite-category-ads-all.srs']:
+              check_srs(f)
+          def size_band(path, lo, hi):
+              n = os.path.getsize(path)
+              assert lo <= n <= hi, f"{path}: size {n} outside [{lo}, {hi}]"
+          size_band('geosite-cn.srs', 300 * 1024, 700 * 1024)
+          size_band('geoip-cn.srs', 20 * 1024, 60 * 1024)
+          size_band('geosite-category-ads-all.srs', 5 * 1024, 200 * 1024)
+          print('magic/version/size gates passed')
+          PYEOF
+          $SB rule-set decompile geosite-cn.srs -o merged-check.json
+          python3 - <<'PYEOF'
+          import json
+          d = json.load(open('merged-check.json'))
+          suf = set()
+          for r in d.get('rules', []):
+              suf.update(r.get('domain_suffix', []))
+              suf.update(r.get('domain', []))
+          assert 100000 <= len(suf) <= 130000, f"domain count {len(suf)} outside [100000, 130000]"
+          for dom in ['snssdk.com', 'toutiao.com', 'douyin.com']:
+              assert dom in suf, f"missing required domain {dom}"
+          print(f"count gate passed: {len(suf)} domains, required domains present")
+          PYEOF
+          for d in snssdk.com toutiao.com douyin.com; do
+            if [ -z "$($SB rule-set match -f binary geosite-cn.srs "$d" 2>&1)" ]; then
+              echo "FAIL: $d did not match merged table"; exit 1
+            fi
+          done
+          if [ -n "$($SB rule-set match -f binary geosite-cn.srs google.com 2>&1)" ]; then
+            echo "FAIL: google.com matched merged table"; exit 1
+          fi
+          echo "match gates passed"
+
+      - name: Publish to srs branch
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch origin srs || true
+          if git show-ref --verify --quiet refs/remotes/origin/srs; then
+            git worktree add srs-out origin/srs
+          else
+            git worktree add -b srs srs-out
+          fi
+          cp geosite-cn.srs geoip-cn.srs geosite-category-ads-all.srs srs-out/
+          cd srs-out
+          git add geosite-cn.srs geoip-cn.srs geosite-category-ads-all.srs
+          if git diff --cached --quiet; then
+            echo "no changes, nothing to commit"
+            exit 0
+          fi
+          git commit -m "rules: update $(date -u +%F) (${MERGED_COUNT} domains)"
+          git push origin srs

@@ -1,0 +1,6 @@
+# 自有补充域名：一行一个，# 开头为注释。
+# 这些域名进合并表（MetaCubeX cn ∪ SagerNet cn ∪ 本表）。
+# 只加实测需要的，不要批量抄。
+# snssdk.com：字节跳动 SDK 域名，公开表里没有、实测需要直连，补进来。
+snssdk.com
+# bytecdn.cn 不用加：MetaCubeX 的 +.cn 通配已覆盖它。
